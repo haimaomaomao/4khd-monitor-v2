@@ -546,7 +546,7 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
             if r:
                 soup = BeautifulSoup(r.text, "html.parser")
                 # WordPress块结构: <article>内有<figure>封面 + <h2>标题<a>
-                articles = soup.find_all("article", class_="wp-block-post")
+                articles = soup.find_all("li", class_="wp-block-post")
                 for art in reversed(articles):
                     # 取标题
                     title_el = art.find("h2", class_="wp-block-post-title")
