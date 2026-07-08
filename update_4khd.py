@@ -119,7 +119,52 @@ def load_or_create_telegraph_token():
 def create_telegraph_page(title, image_urls):
     if not TELEGRAPH_TOKEN:
         return None
-    children = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
+    
+    # 下载、裁剪1.5%、上传到Telegraph
+    children = []
+    crop_ratio = CROP_RATIO
+    print(f"  📝 处理 {len(image_urls)} 张图（下载→裁剪1.5%→上传）")
+    for idx, url in enumerate(image_urls):
+        res = download_image(url, BASE_URL)
+        if not res:
+            print(f"    ⚠️ 第{idx+1}张下载失败，跳过: {url[:40]}")
+            continue
+        data, ctype = res
+        try:
+            img = Image.open(BytesIO(data.read())).convert("RGB")
+            w, h = img.size
+            # 裁剪1.5%
+            if w > 20 and h > 20:
+                l = int(w * crop_ratio)
+                t = int(h * crop_ratio)
+                r = int(w * (1 - crop_ratio))
+                b = int(h * (1 - crop_ratio))
+                img = img.crop((l, t, r, b))
+            buf = BytesIO()
+            img.save(buf, format='JPEG', quality=92)
+            buf.seek(0)
+            # 上传到 Telegraph
+            up = requests.post(
+                "https://telegra.ph/upload",
+                files={"file": ("img.jpg", buf, "image/jpeg")},
+                timeout=30,
+            )
+            if up.status_code == 200 and up.json():
+                src = up.json()[0].get("src", "")
+                if src:
+                    full_url = "https://telegra.ph" + src
+                    children.append({"tag": "img", "attrs": {"src": full_url}})
+                    if (idx + 1) % 10 == 0:
+                        print(f"    📤 已上传 {idx+1}/{len(image_urls)}")
+                    continue
+        except Exception as e:
+            print(f"    ⚠️ 第{idx+1}张处理失败: {e}")
+        # fallback: 用原图URL
+        children.append({"tag": "img", "attrs": {"src": url}})
+    
+    if not children:
+        return None
+    
     print(f"  📝 创建 Telegraph 页面，共 {len(children)} 张")
     for attempt in range(3):
         try:
@@ -131,7 +176,7 @@ def create_telegraph_page(title, image_urls):
                     "content": json.dumps(children, ensure_ascii=False),
                     "return_content": "false",
                 },
-                timeout=15,
+                timeout=60,
             )
             if r.status_code == 200 and r.json().get("ok"):
                 url = r.json()["result"]["url"]
@@ -322,66 +367,6 @@ def download_image(url, referer, retries=2):
 #  封面处理：从文章页提取首页 → logo遮挡 → 1.5%裁剪
 # ══════════════════════════════════════════════════════════
 
-def blur_watermark_on_image(img):
-    w, h = img.size
-    blur_radius = max(w, h) // 60
-    regions = [
-        (int(w * 0.73), int(h * 0.73), w, h),
-        (0, int(h * 0.73), int(w * 0.27), h),
-        (int(w * 0.73), 0, w, int(h * 0.14)),
-        (0, 0, int(w * 0.27), int(h * 0.14)),
-        (int(w * 0.2), int(h * 0.89), int(w * 0.8), h),
-    ]
-    for region in regions:
-        try:
-            crop = img.crop(region)
-            if crop.size[0] > 0 and crop.size[1] > 0:
-                blurred = crop.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-                img.paste(blurred, region)
-        except Exception:
-            pass
-    return img
-
-
-def crop_full_size_on_image(img):
-    """四边各裁掉 CROP_RATIO = 1.5%"""
-    w, h = img.size
-    ratio = CROP_RATIO
-    left   = int(w * ratio)
-    top    = int(h * ratio)
-    right  = int(w * (1 - ratio))
-    bottom = int(h * (1 - ratio))
-    cropped_w = right - left
-    cropped_h = bottom - top
-    if cropped_w > 20 and cropped_h > 20:
-        return img.crop((left, top, right, bottom))
-    return img
-
-
-def process_cover_image(cover_item):
-    data, ctype = cover_item
-    data_bytes = data.read()
-    try:
-        img = Image.open(BytesIO(data_bytes))
-        img = img.convert("RGB")
-        print(f"  🖼️ 原始尺寸: {img.size[0]}×{img.size[1]}")
-        img = blur_watermark_on_image(img)
-        before = img.size
-        img = crop_full_size_on_image(img)
-        if img.size != before:
-            print(f"  ✂️ 已裁剪: {before[0]}×{before[1]} → {img.size[0]}×{img.size[1]} (四边各 -{CROP_RATIO*100:.1f}%)")
-        else:
-            print(f"  ℹ️ 未裁剪（图片太小?）")
-        output = BytesIO()
-        img.save(output, format='JPEG', quality=95)
-        output.seek(0)
-        return output, 'image/jpeg'
-    except Exception as e:
-        print(f"  ⚠️ 封面处理失败: {e}，使用原图")
-        data.seek(0)
-        return data, ctype
-
-
 def download_cover(post_url, referer):
     """从 4khd 文章页面提取第一张图作为封面"""
     r = fetch_with_retry(post_url)
@@ -460,21 +445,17 @@ def process_post(title, post_url, cover_url_from_list=""):
 
     telegraph_url = create_telegraph_page(clean_t, urls)
 
-    # 封面：从文章页提取第一张展示图
-    # 优先用列表页缩略图，没有才从文章页提取
-    if cover_url_from_list:
-        print(f"  📸 封面(列表页缩略图): {cover_url_from_list[:80]}")
-        cover_item = download_image(cover_url_from_list, post_url)
-        if not cover_item:
-            print(f"  ⚠️ 缩略图下载失败，尝试文章页首图")
-            cover_item = download_cover(post_url, post_url)
-    else:
+    # 封面：用文章首张全尺寸图（裁剪才有意义）
+    if urls:
+        print(f"  📸 封面(文章首图): {urls[0][:80]}")
+        cover_item = download_image(urls[0], post_url)
+    if not cover_item:
         cover_item = download_cover(post_url, post_url)
     if not cover_item:
         print("  ❌ 封面下载失败")
         return False
 
-    cover_item = process_cover_image(cover_item)
+    # 封面原图直发（不裁剪，裁剪用在图集里）
 
     caption = f"<b>{clean_t}</b>"
     if tag_str:
