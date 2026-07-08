@@ -318,7 +318,25 @@ def crop_image(img_bytes, crop_ratio=CROP_RATIO):
         return img_bytes
 
 
+def download_image_raw(url, referer, retries=2):
+    """下载原图（不裁剪）"""
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, headers={**HEADERS, "Referer": referer}, timeout=15, verify=False)
+            r.raise_for_status()
+            ct = r.headers.get("Content-Type", "image/jpeg")
+            if not ct.startswith("image/"):
+                return None
+            return BytesIO(r.content), ct
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"  ⚠️ 下载失败 {url[:60]}: {e}")
+            time.sleep(1)
+    return None
+
+
 def download_image(url, referer, retries=2):
+    """下载图片并自动裁剪1.5%（用于图集）"""
     for attempt in range(retries):
         try:
             r = requests.get(
@@ -331,7 +349,6 @@ def download_image(url, referer, retries=2):
             ct = r.headers.get("Content-Type", "image/jpeg")
             if not ct.startswith("image/"):
                 return None
-            # 每次下载自动裁剪1.5%（跟tb-deploy一样）
             cropped = crop_image(BytesIO(r.content))
             return cropped, ct
         except Exception as e:
@@ -423,10 +440,13 @@ def process_post(title, post_url, cover_url_from_list=""):
 
     telegraph_url = create_telegraph_page(clean_t, urls)
 
-    # 封面：用文章首张全尺寸图（裁剪才有意义）
-    if urls:
-        print(f"  📸 封面(文章首图): {urls[0][:80]}")
-        cover_item = download_image(urls[0], post_url)
+    # 封面用列表页缩略图（不裁剪）
+    cover_item = None
+    if cover_url_from_list:
+        print(f"  📸 封面(列表页缩略图): {cover_url_from_list[:80]}")
+        raw = download_image_raw(cover_url_from_list, post_url)
+        if raw:
+            cover_item = raw
     if not cover_item:
         cover_item = download_cover(post_url, post_url)
     if not cover_item:
