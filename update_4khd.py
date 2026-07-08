@@ -14,7 +14,6 @@ from openai import OpenAI
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ── 环境变量 ──────────────────────────────────────────────
 TOKEN            = os.getenv("TG_TOKEN")
 CHAT_ID          = os.getenv("TG_CHAT_ID")
 GROUP_ID         = os.getenv("TG_GROUP_ID")
@@ -22,14 +21,13 @@ AI_API_KEY       = os.getenv("AI_API_KEY")
 AI_BASE_URL      = os.getenv("AI_BASE_URL", "https://api.deepseek.com")
 AI_MODEL         = os.getenv("AI_MODEL", "deepseek-chat")
 
-# ── 常量 ──────────────────────────────────────────────────
 MAX_PAGES           = 10
 MIN_CAT_PAGES       = 5
 MAX_IMAGES          = 9999
 SEEN_FILE           = "seen_posts.json"
 BASE_URL            = "https://www.4khd.com/"
 TELEGRAPH_TOKEN_FILE = "telegraph_token.txt"
-CROP_RATIO          = 0.05   # 四边各裁 5%
+CROP_RATIO          = 0.015   # 四边各裁 1.5%
 
 ALL_CATEGORIES = [
     "https://www.4khd.com/",
@@ -58,7 +56,6 @@ def init_ai():
             ai_client = None
     else:
         print("ℹ️ 未配置 AI_API_KEY，使用默认标签")
-        print("   免费注册: https://platform.deepseek.com/ 获取 API Key")
 
 
 def generate_tags_with_ai(title):
@@ -321,11 +318,13 @@ def download_image(url, referer, retries=2):
     return None
 
 
+# ══════════════════════════════════════════════════════════
+#  封面处理：从文章页提取首页 → logo遮挡 → 1.5%裁剪
+# ══════════════════════════════════════════════════════════
+
 def blur_watermark_on_image(img):
-    """模糊遮挡图片四角及底部中央的水印/logo区域"""
     w, h = img.size
     blur_radius = max(w, h) // 60
-
     regions = [
         (int(w * 0.73), int(h * 0.73), w, h),
         (0, int(h * 0.73), int(w * 0.27), h),
@@ -333,7 +332,6 @@ def blur_watermark_on_image(img):
         (0, 0, int(w * 0.27), int(h * 0.14)),
         (int(w * 0.2), int(h * 0.89), int(w * 0.8), h),
     ]
-
     for region in regions:
         try:
             crop = img.crop(region)
@@ -342,24 +340,21 @@ def blur_watermark_on_image(img):
                 img.paste(blurred, region)
         except Exception:
             pass
-
     return img
 
 
 def crop_full_size_on_image(img):
-    """四边各裁掉 CROP_RATIO (5%)"""
+    """四边各裁掉 CROP_RATIO = 1.5%"""
     w, h = img.size
     ratio = CROP_RATIO
     left   = int(w * ratio)
     top    = int(h * ratio)
     right  = int(w * (1 - ratio))
     bottom = int(h * (1 - ratio))
-
     cropped_w = right - left
     cropped_h = bottom - top
     if cropped_w > 20 and cropped_h > 20:
         return img.crop((left, top, right, bottom))
-
     return img
 
 
@@ -371,8 +366,12 @@ def process_cover_image(cover_item):
         img = img.convert("RGB")
         print(f"  🖼️ 原始尺寸: {img.size[0]}×{img.size[1]}")
         img = blur_watermark_on_image(img)
+        before = img.size
         img = crop_full_size_on_image(img)
-        print(f"  ✂️ 裁剪后尺寸: {img.size[0]}×{img.size[1]} (四边各 -{CROP_RATIO*100:.0f}%)")
+        if img.size != before:
+            print(f"  ✂️ 已裁剪: {before[0]}×{before[1]} → {img.size[0]}×{img.size[1]} (四边各 -{CROP_RATIO*100:.1f}%)")
+        else:
+            print(f"  ℹ️ 未裁剪（图片太小?）")
         output = BytesIO()
         img.save(output, format='JPEG', quality=95)
         output.seek(0)
@@ -383,20 +382,36 @@ def process_cover_image(cover_item):
         return data, ctype
 
 
-def download_cover(urls, referer):
-    if not urls:
-        print("  ❌ 无图片URL可下载")
+def download_cover(post_url, referer):
+    """从 4khd 文章页面提取第一张图作为封面"""
+    r = fetch_with_retry(post_url)
+    if not r:
+        print(f"  ❌ 无法获取页面: {post_url}")
         return None
-    for i, url in enumerate(urls[:5]):
-        print(f"  📸 尝试封面({i+1}/{min(len(urls),5)}): {url[:80]}")
+    soup = BeautifulSoup(r.text, "html.parser")
+    imgs = extract_images_from_content(soup)
+    if not imgs:
+        print("  ❌ 页面内无图片")
+        return None
+    cover_url = imgs[0]
+    print(f"  📸 封面图: {cover_url[:80]}")
+    res = download_image(cover_url, referer)
+    if res:
+        print(f"  ✅ 封面下载成功")
+        return res
+    for i, url in enumerate(imgs[1:5], 2):
+        print(f"  📸 尝试备用封面{i}: {url[:60]}")
         res = download_image(url, referer)
         if res:
-            print(f"  ✅ 封面下载成功")
             return res
         time.sleep(0.3)
-    print("  ❌ 封面下载失败（前5张均无法下载）")
+    print("  ❌ 封面下载失败")
     return None
 
+
+# ══════════════════════════════════════════════════════════
+#  Telegram
+# ══════════════════════════════════════════════════════════
 
 def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
     cover_data, cover_ctype = cover_data_tuple
@@ -425,6 +440,10 @@ def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
     return False
 
 
+# ══════════════════════════════════════════════════════════
+#  主流程
+# ══════════════════════════════════════════════════════════
+
 def process_post(title, post_url):
     clean_t = clean_title(title) or title.strip()
     print(f"\n📥 {clean_t[:60]}")
@@ -441,7 +460,8 @@ def process_post(title, post_url):
 
     telegraph_url = create_telegraph_page(clean_t, urls)
 
-    cover_item = download_cover(urls, post_url)
+    # 封面：从文章页提取第一张展示图
+    cover_item = download_cover(post_url, post_url)
     if not cover_item:
         print("  ❌ 封面下载失败")
         return False
