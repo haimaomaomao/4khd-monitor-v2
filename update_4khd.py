@@ -444,7 +444,7 @@ def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
 #  主流程
 # ══════════════════════════════════════════════════════════
 
-def process_post(title, post_url):
+def process_post(title, post_url, cover_url_from_list=""):
     clean_t = clean_title(title) or title.strip()
     print(f"\n📥 {clean_t[:60]}")
 
@@ -461,7 +461,15 @@ def process_post(title, post_url):
     telegraph_url = create_telegraph_page(clean_t, urls)
 
     # 封面：从文章页提取第一张展示图
-    cover_item = download_cover(post_url, post_url)
+    # 优先用列表页缩略图，没有才从文章页提取
+    if cover_url_from_list:
+        print(f"  📸 封面(列表页缩略图): {cover_url_from_list[:80]}")
+        cover_item = download_image(cover_url_from_list, post_url)
+        if not cover_item:
+            print(f"  ⚠️ 缩略图下载失败，尝试文章页首图")
+            cover_item = download_cover(post_url, post_url)
+    else:
+        cover_item = download_cover(post_url, post_url)
     if not cover_item:
         print("  ❌ 封面下载失败")
         return False
@@ -543,7 +551,12 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
                     if "/content/" in href and title:
                         full = href if href.startswith("http") else BASE_URL.rstrip("/") + href
                         if full not in global_seen_urls:
-                            page_posts.append({"title": title, "url": full})
+                                                        # 取列表页展示的封面缩略图
+                            cover_img = a.find("img")
+                            cover_src = ""
+                            if cover_img:
+                                cover_src = cover_img.get("src") or cover_img.get("data-src") or ""
+                            page_posts.append({"title": title, "url": full, "cover_url": cover_src})
                             global_seen_urls.add(full)
                             print(f"    ✅ 新帖: {title[:50]}... | {full}")
                         else:
@@ -600,7 +613,7 @@ if __name__ == "__main__":
     print(f"发现 {len(new_posts)} 条新内容（发送顺序：从旧到新）")
     success = 0
     for i, p in enumerate(new_posts, 1):
-        ok = process_post(p["title"], p["url"])
+        ok = process_post(p["title"], p["url"], p.get("cover_url", ""))
         if ok:
             seen.add(p["url"])
             success += 1
