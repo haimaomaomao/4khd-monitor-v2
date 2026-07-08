@@ -492,13 +492,15 @@ def process_post(title, post_url):
 
 
 def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
-    all_posts = []
+    """按页交错发：先发所有分类的最后一页，再发倒数第二页..."""
+    all_categorized_posts = []  # all_categorized_posts[cat_idx][page_idx] = [posts]
     global_seen_urls = set()
 
-    for page_url in pages:
+    for cat_idx, page_url in enumerate(pages):
         print(f"\n===== 抓取分类: {page_url} =====")
         r = fetch_with_retry(page_url)
         if not r:
+            all_categorized_posts.append([])
             continue
         soup = BeautifulSoup(r.text, "html.parser")
         cat_pages = get_all_page_urls(page_url, soup)
@@ -522,39 +524,54 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
                     cat_pages.append(new_url)
             print(f"  补充后共 {len(cat_pages)} 个分页")
 
-        cat_pages = cat_pages[:min_pages][::-1]
+        # 反转：从旧到新
+        cat_pages_sorted = cat_pages[:min_pages][::-1]
         print(f"  页面抓取顺序（从旧到新）:")
-        for c in cat_pages:
+        for c in cat_pages_sorted:
             print(f"    {c}")
 
-        for idx, cat_url in enumerate(cat_pages, 1):
+        category_posts = []  # category_posts[page_idx] = [posts from this page]
+        for idx, cat_url in enumerate(cat_pages_sorted, 1):
             print(f"  📄 第{idx}页: {cat_url}")
             r = fetch_with_retry(cat_url)
-            if not r:
-                continue
-            soup = BeautifulSoup(r.text, "html.parser")
-            count = 0
-            for a in reversed(soup.find_all("a", href=True)):
-                href = a["href"]
-                title = a.text.strip()
-                if "/content/" in href and title:
-                    full = href if href.startswith("http") else BASE_URL.rstrip("/") + href
-                    if full not in global_seen_urls:
-                        all_posts.append({"title": title, "url": full})
-                        global_seen_urls.add(full)
-                        count += 1
-                        print(f"    ✅ 新帖: {title[:50]}... | {full}")
+            page_posts = []
+            if r:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in reversed(soup.find_all("a", href=True)):
+                    href = a["href"]
+                    title = a.text.strip()
+                    if "/content/" in href and title:
+                        full = href if href.startswith("http") else BASE_URL.rstrip("/") + href
+                        if full not in global_seen_urls:
+                            page_posts.append({"title": title, "url": full})
+                            global_seen_urls.add(full)
+                            print(f"    ✅ 新帖: {title[:50]}... | {full}")
+                        else:
+                            print(f"    ⏭️ 已抓取过: {title[:50]}...")
                     else:
-                        print(f"    ⏭️ 已抓取过: {title[:50]}...")
-                else:
-                    if title:
-                        print(f"    ❌ 跳过: {title[:50]}...  (href: {href[:60]})")
-            print(f"    新增 {count} 条")
+                        if title:
+                            print(f"    ❌ 跳过: {title[:50]}...  (href: {href[:60]})")
+                print(f"    本页新增 {len(page_posts)} 条")
+            category_posts.append(page_posts)
             time.sleep(0.3)
 
-    print(f"\n===== 共 {len(all_posts)} 条候选帖子（已跨分类去重） =====")
-    return all_posts
+        all_categorized_posts.append(category_posts)
 
+    # 按页交错排列：先发所有分类的最后一页(第5页)，再发第4页...最后第1页
+    final_posts = []
+    max_pages = max((len(cp) for cp in all_categorized_posts), default=0)
+    print(f"\n===== 按页交错排列（{max_pages}页 × {len(pages)}分类）=====")
+    for page_idx in range(max_pages - 1, -1, -1):  # 从最后一页到第一页
+        for cat_idx in range(len(pages)):
+            if page_idx < len(all_categorized_posts[cat_idx]):
+                posts = all_categorized_posts[cat_idx][page_idx]
+                if posts:
+                    cat_name = pages[cat_idx].split("/")[-2] if pages[cat_idx] != BASE_URL else "popular"
+                    print(f"  🔄 分类[{cat_name}] 第{page_idx+1}页 → {len(posts)} 条")
+                    final_posts.extend(posts)
+
+    print(f"\n===== 共 {len(final_posts)} 条候选帖子（按页交错排列） =====")
+    return final_posts
 
 if __name__ == "__main__":
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 4KHD 搬运启动")
