@@ -119,52 +119,7 @@ def load_or_create_telegraph_token():
 def create_telegraph_page(title, image_urls):
     if not TELEGRAPH_TOKEN:
         return None
-    
-    # 下载、裁剪1.5%、上传到Telegraph
-    children = []
-    crop_ratio = CROP_RATIO
-    print(f"  📝 处理 {len(image_urls)} 张图（下载→裁剪1.5%→上传）")
-    for idx, url in enumerate(image_urls):
-        res = download_image(url, BASE_URL)
-        if not res:
-            print(f"    ⚠️ 第{idx+1}张下载失败，跳过: {url[:40]}")
-            continue
-        data, ctype = res
-        try:
-            img = Image.open(BytesIO(data.read())).convert("RGB")
-            w, h = img.size
-            # 裁剪1.5%
-            if w > 20 and h > 20:
-                l = int(w * crop_ratio)
-                t = int(h * crop_ratio)
-                r = int(w * (1 - crop_ratio))
-                b = int(h * (1 - crop_ratio))
-                img = img.crop((l, t, r, b))
-            buf = BytesIO()
-            img.save(buf, format='JPEG', quality=92)
-            buf.seek(0)
-            # 上传到 Telegraph
-            up = requests.post(
-                "https://telegra.ph/upload",
-                files={"file": ("img.jpg", buf, "image/jpeg")},
-                timeout=30,
-            )
-            if up.status_code == 200 and up.json():
-                src = up.json()[0].get("src", "")
-                if src:
-                    full_url = "https://telegra.ph" + src
-                    children.append({"tag": "img", "attrs": {"src": full_url}})
-                    if (idx + 1) % 10 == 0:
-                        print(f"    📤 已上传 {idx+1}/{len(image_urls)}")
-                    continue
-        except Exception as e:
-            print(f"    ⚠️ 第{idx+1}张处理失败: {e}")
-        # fallback: 用原图URL
-        children.append({"tag": "img", "attrs": {"src": url}})
-    
-    if not children:
-        return None
-    
+    children = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
     print(f"  📝 创建 Telegraph 页面，共 {len(children)} 张")
     for attempt in range(3):
         try:
@@ -342,6 +297,27 @@ def get_real_images(post_url):
     return all_images[:MAX_IMAGES]
 
 
+def crop_image(img_bytes, crop_ratio=CROP_RATIO):
+    """裁剪图片四边各 crop_ratio（默认1.5%）"""
+    try:
+        img = Image.open(img_bytes)
+        w, h = img.size
+        l = int(w * crop_ratio)
+        t = int(h * crop_ratio)
+        r = int(w * (1 - crop_ratio))
+        b = int(h * (1 - crop_ratio))
+        cropped = img.crop((l, t, r, b))
+        output = BytesIO()
+        img_format = img.format or "JPEG"
+        cropped.save(output, format=img_format, quality=95)
+        output.seek(0)
+        return output
+    except Exception as e:
+        print(f"  ⚠️ 裁剪失败: {e}")
+        img_bytes.seek(0)
+        return img_bytes
+
+
 def download_image(url, referer, retries=2):
     for attempt in range(retries):
         try:
@@ -355,7 +331,9 @@ def download_image(url, referer, retries=2):
             ct = r.headers.get("Content-Type", "image/jpeg")
             if not ct.startswith("image/"):
                 return None
-            return BytesIO(r.content), ct
+            # 每次下载自动裁剪1.5%（跟tb-deploy一样）
+            cropped = crop_image(BytesIO(r.content))
+            return cropped, ct
         except Exception as e:
             if attempt == retries - 1:
                 print(f"  ⚠️ 下载失败 {url[:60]}: {e}")
