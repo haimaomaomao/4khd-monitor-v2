@@ -116,42 +116,10 @@ def load_or_create_telegraph_token():
         print(f"❌ Telegraph 初始化异常: {e}")
 
 
-def upload_to_freeimage(img_bytes):
-    """上传图片到 freeimage.host，返回直链"""
-    try:
-        up = requests.post(
-            "https://freeimage.host/api/1/upload?key=6d207e02198a847aa98d0a2a901485a5",
-            files={"source": ("img.jpg", img_bytes, "image/jpeg")},
-            timeout=30,
-        )
-        if up.status_code == 200 and up.json().get("status_code") == 200:
-            return up.json()["image"]["url"]
-    except Exception as e:
-        print(f"    ⚠️ 图床上传失败: {e}")
-    return None
-
-
 def create_telegraph_page(title, image_urls):
     if not TELEGRAPH_TOKEN:
         return None
-    children = []
-    print(f"  📝 下载→裁剪1.5%→上传图床({len(image_urls)}张)")
-    for idx, url in enumerate(image_urls):
-        res = download_image(url, BASE_URL)
-        if res:
-            img_data, _ = res
-            img_data.seek(0)
-            uploaded = upload_to_freeimage(img_data)
-            if uploaded:
-                children.append({"tag": "img", "attrs": {"src": uploaded}})
-                if (idx + 1) % 20 == 0:
-                    print(f"    📤 {idx+1}/{len(image_urls)}")
-                continue
-        # fallback: 原图
-        children.append({"tag": "img", "attrs": {"src": url}})
-    
-    if not children:
-        return None
+    children = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
     print(f"  📝 创建 Telegraph 页面，共 {len(children)} 张")
     for attempt in range(3):
         try:
