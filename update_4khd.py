@@ -19,8 +19,8 @@ TOKEN            = os.getenv("TG_TOKEN")
 CHAT_ID          = os.getenv("TG_CHAT_ID")
 GROUP_ID         = os.getenv("TG_GROUP_ID")
 AI_API_KEY       = os.getenv("AI_API_KEY")
-AI_BASE_URL      = os.getenv("AI_BASE_URL", "https://api.siliconflow.cn/v1")
-AI_MODEL         = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+AI_BASE_URL      = os.getenv("AI_BASE_URL", "https://api.deepseek.com")
+AI_MODEL         = os.getenv("AI_MODEL", "deepseek-chat")
 
 # ── 常量 ──────────────────────────────────────────────────
 MAX_PAGES           = 10
@@ -29,7 +29,7 @@ MAX_IMAGES          = 9999
 SEEN_FILE           = "seen_posts.json"
 BASE_URL            = "https://www.4khd.com/"
 TELEGRAPH_TOKEN_FILE = "telegraph_token.txt"
-CROP_RATIO          = 0.015   # 四边各裁 1.5%
+CROP_RATIO          = 0.05   # 四边各裁 5%
 
 ALL_CATEGORIES = [
     "https://www.4khd.com/",
@@ -47,12 +47,6 @@ TELEGRAPH_TOKEN = None
 ai_client = None
 
 
-# ══════════════════════════════════════════════════════════
-#  AI 智能标签（兼容 OpenAI 格式，默认用硅基流动免费模型）
-#  注册免费 Key: https://cloud.siliconflow.cn → API密钥
-#  其他兼容服务商也可，只需改 AI_BASE_URL 和 AI_MODEL
-# ══════════════════════════════════════════════════════════
-
 def init_ai():
     global ai_client
     if AI_API_KEY:
@@ -64,14 +58,12 @@ def init_ai():
             ai_client = None
     else:
         print("ℹ️ 未配置 AI_API_KEY，使用默认标签")
-        print("   免费注册: https://cloud.siliconflow.cn → API密钥")
+        print("   免费注册: https://platform.deepseek.com/ 获取 API Key")
 
 
 def generate_tags_with_ai(title):
-    """用 AI 根据标题智能生成标签"""
     if not ai_client:
         return ["#写真", "#美女"]
-
     prompt = (
         "你是一个写真/Cosplay标签专家。根据以下写真标题，提取3-5个最贴切的标签。\n"
         "标签用中文或英文都可以，每个标签以#开头。\n"
@@ -80,7 +72,6 @@ def generate_tags_with_ai(title):
         f"标题: {title}\n\n"
         "示例输出: #Cosplay #兔女郎 #碧蓝航线 #泳装 #黑丝"
     )
-
     try:
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
@@ -93,15 +84,11 @@ def generate_tags_with_ai(title):
         if not tags:
             tags = re.findall(r'[\w一-鿿]{2,8}', tags_text)
             tags = [f"#{t}" for t in tags]
-        return list(dict.fromkeys(tags))[:5]  # 去重，最多5个
+        return list(dict.fromkeys(tags))[:5]
     except Exception as e:
         print(f"  ⚠️ AI标签生成失败: {e}")
         return ["#写真", "#美女"]
 
-
-# ══════════════════════════════════════════════════════════
-#  Telegraph
-# ══════════════════════════════════════════════════════════
 
 def load_or_create_telegraph_token():
     global TELEGRAPH_TOKEN
@@ -162,10 +149,6 @@ def create_telegraph_page(title, image_urls):
     return None
 
 
-# ══════════════════════════════════════════════════════════
-#  Seen 持久化
-# ══════════════════════════════════════════════════════════
-
 def load_seen():
     if not os.path.exists(SEEN_FILE) or os.path.getsize(SEEN_FILE) == 0:
         return set()
@@ -196,10 +179,6 @@ def save_seen(seen):
     except Exception as e:
         print(f"  ⚠️ git commit 失败: {e}")
 
-
-# ══════════════════════════════════════════════════════════
-#  工具函数
-# ══════════════════════════════════════════════════════════
 
 def clean_title(title):
     title = re.sub(r'\[[^\]]*\]', '', title)
@@ -342,21 +321,17 @@ def download_image(url, referer, retries=2):
     return None
 
 
-# ══════════════════════════════════════════════════════════
-#  封面处理：logo遮挡 + 1.5%全尺寸裁剪
-# ══════════════════════════════════════════════════════════
-
 def blur_watermark_on_image(img):
     """模糊遮挡图片四角及底部中央的水印/logo区域"""
     w, h = img.size
     blur_radius = max(w, h) // 60
 
     regions = [
-        (int(w * 0.73), int(h * 0.73), w, h),                    # 右下角
-        (0, int(h * 0.73), int(w * 0.27), h),                     # 左下角
-        (int(w * 0.73), 0, w, int(h * 0.14)),                     # 右上角
-        (0, 0, int(w * 0.27), int(h * 0.14)),                     # 左上角
-        (int(w * 0.2), int(h * 0.89), int(w * 0.8), h),          # 底部横条
+        (int(w * 0.73), int(h * 0.73), w, h),
+        (0, int(h * 0.73), int(w * 0.27), h),
+        (int(w * 0.73), 0, w, int(h * 0.14)),
+        (0, 0, int(w * 0.27), int(h * 0.14)),
+        (int(w * 0.2), int(h * 0.89), int(w * 0.8), h),
     ]
 
     for region in regions:
@@ -372,7 +347,7 @@ def blur_watermark_on_image(img):
 
 
 def crop_full_size_on_image(img):
-    """四边各裁掉 CROP_RATIO (1.5%)，保留全尺寸核心画面"""
+    """四边各裁掉 CROP_RATIO (5%)"""
     w, h = img.size
     ratio = CROP_RATIO
     left   = int(w * ratio)
@@ -389,19 +364,15 @@ def crop_full_size_on_image(img):
 
 
 def process_cover_image(cover_item):
-    """对封面图执行: logo遮挡 + 1.5%全尺寸裁剪"""
     data, ctype = cover_item
     data_bytes = data.read()
-
     try:
         img = Image.open(BytesIO(data_bytes))
         img = img.convert("RGB")
         print(f"  🖼️ 原始尺寸: {img.size[0]}×{img.size[1]}")
-
         img = blur_watermark_on_image(img)
         img = crop_full_size_on_image(img)
-        print(f"  ✂️ 裁剪后尺寸: {img.size[0]}×{img.size[1]} (四边各 -{CROP_RATIO*100:.1f}%)")
-
+        print(f"  ✂️ 裁剪后尺寸: {img.size[0]}×{img.size[1]} (四边各 -{CROP_RATIO*100:.0f}%)")
         output = BytesIO()
         img.save(output, format='JPEG', quality=95)
         output.seek(0)
@@ -413,7 +384,6 @@ def process_cover_image(cover_item):
 
 
 def download_cover(urls, referer):
-    """直接取4khd页面展示的第一张图作为封面"""
     if not urls:
         print("  ❌ 无图片URL可下载")
         return None
@@ -427,10 +397,6 @@ def download_cover(urls, referer):
     print("  ❌ 封面下载失败（前5张均无法下载）")
     return None
 
-
-# ══════════════════════════════════════════════════════════
-#  发送到 Telegram
-# ══════════════════════════════════════════════════════════
 
 def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
     cover_data, cover_ctype = cover_data_tuple
@@ -458,10 +424,6 @@ def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
             time.sleep(2)
     return False
 
-
-# ══════════════════════════════════════════════════════════
-#  主流程
-# ══════════════════════════════════════════════════════════
 
 def process_post(title, post_url):
     clean_t = clean_title(title) or title.strip()
