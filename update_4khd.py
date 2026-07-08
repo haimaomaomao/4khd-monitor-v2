@@ -545,25 +545,34 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
             page_posts = []
             if r:
                 soup = BeautifulSoup(r.text, "html.parser")
-                for a in reversed(soup.find_all("a", href=True)):
-                    href = a["href"]
-                    title = a.text.strip()
-                    if "/content/" in href and title:
-                        full = href if href.startswith("http") else BASE_URL.rstrip("/") + href
-                        if full not in global_seen_urls:
-                                                        # 取列表页展示的封面缩略图
-                            cover_img = a.find("img")
-                            cover_src = ""
-                            if cover_img:
-                                cover_src = cover_img.get("src") or cover_img.get("data-src") or ""
-                            page_posts.append({"title": title, "url": full, "cover_url": cover_src})
-                            global_seen_urls.add(full)
-                            print(f"    ✅ 新帖: {title[:50]}... | {full}")
-                        else:
-                            print(f"    ⏭️ 已抓取过: {title[:50]}...")
-                    else:
-                        if title:
-                            print(f"    ❌ 跳过: {title[:50]}...  (href: {href[:60]})")
+                # WordPress块结构: <article>内有<figure>封面 + <h2>标题<a>
+                articles = soup.find_all("article", class_="wp-block-post")
+                for art in reversed(articles):
+                    # 取标题
+                    title_el = art.find("h2", class_="wp-block-post-title")
+                    if not title_el:
+                        continue
+                    link = title_el.find("a", href=True)
+                    if not link:
+                        continue
+                    href = link["href"]
+                    title = link.text.strip()
+                    if not title:
+                        continue
+                    full = href if href.startswith("http") else BASE_URL.rstrip("/") + href
+                    if full in global_seen_urls:
+                        print(f"    ⏭️ 已抓取过: {title[:50]}...")
+                        continue
+                    # 取封面
+                    cover_src = ""
+                    figure = art.find("figure", class_="wp-block-post-featured-image")
+                    if figure:
+                        cover_img = figure.find("img")
+                        if cover_img:
+                            cover_src = fix_image_url(cover_img.get("src") or cover_img.get("data-src") or "")
+                    page_posts.append({"title": title, "url": full, "cover_url": cover_src})
+                    global_seen_urls.add(full)
+                    print(f"    ✅ 新帖: {title[:50]}... | {full}" + (f" | 🖼️ {cover_src[:30]}..." if cover_src else ""))
                 print(f"    本页新增 {len(page_posts)} 条")
             category_posts.append(page_posts)
             time.sleep(0.3)
