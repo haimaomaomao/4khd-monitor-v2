@@ -5,22 +5,25 @@ import json
 import os
 import sys
 import re
+import struct
 import subprocess
 from io import BytesIO
 import urllib3
 from urllib.parse import urljoin
-from PIL import Image, ImageFilter
+from PIL import Image
 from openai import OpenAI
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TOKEN            = os.getenv("TG_TOKEN")
-CHAT_ID          = os.getenv("TG_CHAT_ID")
-GROUP_ID         = os.getenv("TG_GROUP_ID")
-AI_API_KEY       = os.getenv("AI_API_KEY")
-AI_BASE_URL      = os.getenv("AI_BASE_URL", "https://api.deepseek.com")
-AI_MODEL         = os.getenv("AI_MODEL", "deepseek-chat")
+# ── 环境变量 ──────────────────────────────────────────────
+TOKEN       = os.getenv("TG_TOKEN")
+CHAT_ID     = os.getenv("TG_CHAT_ID")
+GROUP_ID    = os.getenv("TG_GROUP_ID")
+AI_API_KEY  = os.getenv("AI_API_KEY")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.deepseek.com")
+AI_MODEL    = os.getenv("AI_MODEL", "deepseek-chat")
 
+# ── 常量 ──────────────────────────────────────────────────
 MAX_PAGES           = 10
 MIN_CAT_PAGES       = 5
 MAX_IMAGES          = 9999
@@ -35,15 +38,19 @@ ALL_CATEGORIES = [
 ]
 
 HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/124.0 Safari/537.36"),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 TELEGRAPH_TOKEN = None
 ai_client = None
 
+
+# ============================================================
+#  AI 标签（增强版新增）
+# ============================================================
 
 def init_ai():
     global ai_client
@@ -52,15 +59,15 @@ def init_ai():
             ai_client = OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
             print(f"✅ AI 标签已启用 → {AI_BASE_URL} / {AI_MODEL}")
         except Exception as e:
-            print(f"⚠️ AI 初始化失败: {e}，使用默认标签")
+            print(f"⚠️ AI 初始化失败: {e}，回退到本地标签库")
             ai_client = None
     else:
-        print("ℹ️ 未配置 AI_API_KEY，使用默认标签")
+        print("ℹ️ 未配置 AI_API_KEY，使用本地标签库")
 
 
 def generate_tags_with_ai(title):
     if not ai_client:
-        return ["#写真", "#美女"]
+        return None   # 返回 None 表示 AI 不可用，由调用方回退
     prompt = (
         "你是一个写真/Cosplay标签专家。根据以下写真标题，提取3-5个最贴切的标签。\n"
         "标签用中文或英文都可以，每个标签以#开头。\n"
@@ -77,15 +84,66 @@ def generate_tags_with_ai(title):
             temperature=0.3,
         )
         tags_text = response.choices[0].message.content.strip()
-        tags = re.findall(r'#[\w一-鿿]+', tags_text)
+        tags = re.findall(r"#[\w一-鿿\-_]+", tags_text)
         if not tags:
-            tags = re.findall(r'[\w一-鿿]{2,8}', tags_text)
+            tags = re.findall(r"[\w一-鿿]{2,8}", tags_text)
             tags = [f"#{t}" for t in tags]
         return list(dict.fromkeys(tags))[:5]
     except Exception as e:
         print(f"  ⚠️ AI标签生成失败: {e}")
-        return ["#写真", "#美女"]
+        return None
 
+
+# ============================================================
+#  本地标签库（原版逻辑，作为 AI 回退方案）
+# ============================================================
+
+def load_tag_library():
+    try:
+        with open("tags.json", "r", encoding="utf-8") as f:
+            lib = json.load(f)
+            print(f"✅ 标签库已加载，共 {len(lib)} 个标签")
+            return lib
+    except Exception as e:
+        print(f"⚠️ 无法加载 tags.json: {e}，使用空标签库")
+        return {}
+
+TAG_LIBRARY = load_tag_library()
+
+
+def generate_tags_local(title, image_urls):
+    tags = set()
+    title_lower = title.lower()
+    for key, tag in TAG_LIBRARY.items():
+        if tag and key.lower() in title_lower:
+            tags.add(f"#{tag}")
+    for url in image_urls[:10]:
+        url_lower = url.lower()
+        for key, tag in TAG_LIBRARY.items():
+            if tag and key.lower() in url_lower:
+                tags.add(f"#{tag}")
+    name_matches = re.findall(r"[A-Z][a-z]+(?:\s[A-Z][a-z]+)+", title)
+    for name in name_matches[:2]:
+        tag_name = name.replace(" ", "")
+        mapped_tag = TAG_LIBRARY.get(tag_name.lower())
+        if mapped_tag:
+            tags.add(f"#{mapped_tag}")
+    if not tags:
+        tags = {"#美女", "#写真"}
+    return list(tags)[:6]
+
+
+def generate_tags(title, image_urls):
+    """优先 AI，回退本地标签库"""
+    ai_tags = generate_tags_with_ai(title)
+    if ai_tags:
+        return ai_tags
+    return generate_tags_local(title, image_urls)
+
+
+# ============================================================
+#  Telegraph
+# ============================================================
 
 def load_or_create_telegraph_token():
     global TELEGRAPH_TOKEN
@@ -95,7 +153,7 @@ def load_or_create_telegraph_token():
                 token = f.read().strip()
             if token:
                 TELEGRAPH_TOKEN = token
-                print("✅ Telegraph token 已从文件加载")
+                print(f"✅ Telegraph token 已从文件加载")
                 return
         except Exception:
             pass
@@ -109,7 +167,7 @@ def load_or_create_telegraph_token():
             TELEGRAPH_TOKEN = r.json()["result"]["access_token"]
             with open(TELEGRAPH_TOKEN_FILE, "w") as f:
                 f.write(TELEGRAPH_TOKEN)
-            print("✅ Telegraph token 已创建并保存")
+            print(f"✅ Telegraph token 已创建并保存")
         else:
             print(f"❌ Telegraph token 创建失败: {r.text}")
     except Exception as e:
@@ -146,6 +204,10 @@ def create_telegraph_page(title, image_urls):
     return None
 
 
+# ============================================================
+#  seen 持久化（含 git 自动提交）
+# ============================================================
+
 def load_seen():
     if not os.path.exists(SEEN_FILE) or os.path.getsize(SEEN_FILE) == 0:
         return set()
@@ -168,7 +230,7 @@ def save_seen(seen):
         subprocess.run(["git", "add"] + files_to_commit, check=False, capture_output=True)
         result = subprocess.run(
             ["git", "commit", "-m", f"chore: update seen [{len(seen)} posts]"],
-            capture_output=True, text=True,
+            capture_output=True, text=True
         )
         if result.returncode == 0:
             subprocess.run(["git", "push"], check=False, capture_output=True)
@@ -177,9 +239,13 @@ def save_seen(seen):
         print(f"  ⚠️ git commit 失败: {e}")
 
 
+# ============================================================
+#  工具函数
+# ============================================================
+
 def clean_title(title):
-    title = re.sub(r'\[[^\]]*\]', '', title)
-    return re.sub(r'\s+', ' ', title).strip()
+    title = re.sub(r"\[[^\]]*\]", "", title)
+    return re.sub(r"\s+", " ", title).strip()
 
 
 def fix_image_url(src):
@@ -189,10 +255,10 @@ def fix_image_url(src):
         src = "https:" + src
     elif not src.startswith("http"):
         src = BASE_URL.rstrip("/") + "/" + src.lstrip("/")
-    src = re.sub(r'https?://i\d+\.wp\.com/', 'https://', src)
-    src = src.replace('pic.4khd.com', 'img.4khd.com')
-    if '?' in src:
-        src = src.split('?')[0]
+    src = re.sub(r"https?://i\d+\.wp\.com/", "https://", src)
+    src = src.replace("pic.4khd.com", "img.4khd.com")
+    if "?" in src:
+        src = src.split("?")[0]
     return src
 
 
@@ -218,22 +284,22 @@ def fetch_with_retry(url, retries=3, delay=2, **kwargs):
 def extract_images_from_content(soup):
     images, seen = [], set()
     content = None
-    for sel in ['article', '.entry-content', '.post-body', '.single-content', 'main']:
+    for sel in ["article", ".entry-content", ".post-body", ".single-content", "main"]:
         content = soup.select_one(sel)
         if content:
             break
     if not content:
-        content = soup.find('body')
+        content = soup.find("body")
     if not content:
         return images
 
-    AD_WORDS = {'related', 'recommend', 'popular', 'ad', 'banner', 'widget', 'sidebar', 'footer'}
+    AD_WORDS = {"related", "recommend", "popular", "ad", "banner", "widget", "sidebar", "footer"}
 
     def is_ad(tag):
         node = tag.parent
         for _ in range(3):
-            if node and node.name in ['div', 'aside', 'section', 'article', 'li', 'figure', 'a']:
-                txt = ' '.join(node.get('class', [])) + ' ' + (node.get('id') or '')
+            if node and node.name in ["div", "aside", "section", "article", "li", "figure", "a"]:
+                txt = " ".join(node.get("class", [])) + " " + (node.get("id") or "")
                 if any(w in txt.lower() for w in AD_WORDS):
                     return True
             node = node.parent if node else None
@@ -285,7 +351,7 @@ def get_real_images(post_url):
             continue
         soup = BeautifulSoup(r.text, "html.parser")
         imgs = extract_images_from_content(soup)
-        for u in re.findall(r'https://yt4\.googleusercontent\.com[^\s"]+\.webp', r.text):
+        for u in re.findall(r"https://yt4\.googleusercontent\.com[^\s\"]+\.webp", r.text):
             u = u.split("?")[0]
             if u not in seen:
                 imgs.append(u)
@@ -297,29 +363,38 @@ def get_real_images(post_url):
     return all_images[:MAX_IMAGES]
 
 
+# ============================================================
+#  图片裁剪（增强版新增）
+# ============================================================
+
 def crop_image(img_bytes, crop_ratio=CROP_RATIO):
     """裁剪图片四边各 crop_ratio（默认1.5%）"""
     try:
-        img = Image.open(img_bytes)
-        w, h = img.size
-        l = int(w * crop_ratio)
-        t = int(h * crop_ratio)
-        r = int(w * (1 - crop_ratio))
-        b = int(h * (1 - crop_ratio))
-        cropped = img.crop((l, t, r, b))
-        output = BytesIO()
-        img_format = img.format or "JPEG"
-        cropped.save(output, format=img_format, quality=95)
-        output.seek(0)
-        return output
+        with Image.open(img_bytes) as img:
+            w, h = img.size
+            l = int(w * crop_ratio)
+            t = int(h * crop_ratio)
+            r = int(w * (1 - crop_ratio))
+            b = int(h * (1 - crop_ratio))
+            cropped = img.crop((l, t, r, b))
+
+            output = BytesIO()
+            img_format = img.format or "JPEG"
+            cropped.save(output, format=img_format, quality=95)
+            output.seek(0)
+            return output
     except Exception as e:
         print(f"  ⚠️ 裁剪失败: {e}")
         img_bytes.seek(0)
         return img_bytes
 
 
+# ============================================================
+#  图片下载（增强版：支持裁剪 / 原图两种模式）
+# ============================================================
+
 def download_image_raw(url, referer, retries=2):
-    """下载原图（不裁剪）"""
+    """下载原图（不裁剪，用于列表页缩略图）"""
     for attempt in range(retries):
         try:
             r = requests.get(url, headers={**HEADERS, "Referer": referer}, timeout=15, verify=False)
@@ -336,7 +411,7 @@ def download_image_raw(url, referer, retries=2):
 
 
 def download_image(url, referer, retries=2):
-    """下载图片并自动裁剪1.5%（用于图集）"""
+    """下载图片并自动裁剪（用于内容页图片）"""
     for attempt in range(retries):
         try:
             r = requests.get(
@@ -358,43 +433,87 @@ def download_image(url, referer, retries=2):
     return None
 
 
-# ══════════════════════════════════════════════════════════
-#  封面处理：从文章页提取首页 → logo遮挡 → 1.5%裁剪
-# ══════════════════════════════════════════════════════════
+# ============================================================
+#  智能封面选择（原版逻辑：按尺寸选最佳竖图）
+# ============================================================
 
-def download_cover(post_url, referer):
-    """从 4khd 文章页面提取第一张图作为封面"""
-    r = fetch_with_retry(post_url)
-    if not r:
-        print(f"  ❌ 无法获取页面: {post_url}")
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    imgs = extract_images_from_content(soup)
-    if not imgs:
-        print("  ❌ 页面内无图片")
-        return None
-    cover_url = imgs[0]
-    print(f"  📸 封面图: {cover_url[:80]}")
-    res = download_image(cover_url, referer)
-    if res:
-        print(f"  ✅ 封面下载成功")
-        return res
-    for i, url in enumerate(imgs[1:5], 2):
-        print(f"  📸 尝试备用封面{i}: {url[:60]}")
+def download_and_select_cover(urls, referer):
+    """从内容图列表中下载前20张，按尺寸选择最佳竖图作为封面"""
+    candidates_urls = urls[:20]
+    downloaded = []
+    for url in candidates_urls:
         res = download_image(url, referer)
         if res:
-            return res
-        time.sleep(0.3)
-    print("  ❌ 封面下载失败")
-    return None
+            downloaded.append((url, res))
+        time.sleep(0.05)
+    if not downloaded:
+        return None, None
+    best_url, best_item = downloaded[0]
+    best_h, found_portrait = 0, False
+    for url, (data, ctype) in downloaded:
+        data.seek(0)
+        w, h = get_image_dimensions(data.read(), ctype)
+        if w == 0:
+            continue
+        if h > w and (not found_portrait or h > best_h):
+            best_url, best_item = url, (data, ctype)
+            best_h, found_portrait = h, True
+        elif not found_portrait and h > best_h:
+            best_url, best_item = url, (data, ctype)
+            best_h = h
+    best_item[0].seek(0)
+    return best_url, best_item
 
 
-# ══════════════════════════════════════════════════════════
-#  Telegram
-# ══════════════════════════════════════════════════════════
+def get_image_dimensions(data_bytes, content_type):
+    try:
+        ct = (content_type or "").lower()
+        if "webp" in ct:
+            if len(data_bytes) < 30 or data_bytes[:4] != b"RIFF":
+                return 0, 0
+            chunk = data_bytes[12:16]
+            if chunk == b"VP8 ":
+                return struct.unpack_from("<H", data_bytes, 26)[0] & 0x3FFF, \
+                       struct.unpack_from("<H", data_bytes, 28)[0] & 0x3FFF
+            elif chunk == b"VP8L":
+                b = struct.unpack_from("<I", data_bytes, 21)[0]
+                return (b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1
+            elif chunk == b"VP8X":
+                return (struct.unpack_from("<I", data_bytes, 24)[0] + 1) & 0xFFFFFF, \
+                       (struct.unpack_from("<I", data_bytes, 27)[0] + 1) & 0xFFFFFF
+        elif "png" in ct:
+            if len(data_bytes) < 24:
+                return 0, 0
+            return struct.unpack(">II", data_bytes[16:24])
+        elif "jpeg" in ct or "jpg" in ct:
+            if len(data_bytes) < 4 or data_bytes[0] != 0xFF or data_bytes[1] != 0xD8:
+                return 0, 0
+            pos = 2
+            while pos < len(data_bytes) - 9:
+                if data_bytes[pos] != 0xFF:
+                    break
+                marker = data_bytes[pos + 1]
+                if marker in (0xD8, 0xD9):
+                    pos += 2
+                    continue
+                if marker == 0xDA:
+                    break
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xCC):
+                    h = struct.unpack_from(">H", data_bytes, pos + 5)[0]
+                    w = struct.unpack_from(">H", data_bytes, pos + 7)[0]
+                    return w, h
+                pos += 2 + struct.unpack_from(">H", data_bytes, pos + 2)[0]
+    except Exception:
+        pass
+    return 0, 0
 
-def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
-    cover_data, cover_ctype = cover_data_tuple
+
+# ============================================================
+#  Telegram 发送
+# ============================================================
+
+def send_photo_with_retry(chat_id, cover_item, caption, retries=3):
+    cover_data, cover_ctype = cover_item
     ext = cover_ctype.split("/")[-1].replace("jpeg", "jpg")
     for attempt in range(retries):
         cover_data.seek(0)
@@ -420,9 +539,9 @@ def send_photo_with_retry(chat_id, cover_data_tuple, caption, retries=3):
     return False
 
 
-# ══════════════════════════════════════════════════════════
-#  主流程
-# ══════════════════════════════════════════════════════════
+# ============================================================
+#  帖子处理（增强版：支持列表页缩略图作封面 + AI 标签）
+# ============================================================
 
 def process_post(title, post_url, cover_url_from_list=""):
     clean_t = clean_title(title) or title.strip()
@@ -434,43 +553,44 @@ def process_post(title, post_url, cover_url_from_list=""):
         return False
     print(f"  图片总数: {len(urls)}")
 
-    tags = generate_tags_with_ai(clean_t)
+    # 标签：优先 AI，回退本地库
+    tags = generate_tags(clean_t, urls)
     tag_str = " ".join(tags)
-    print(f"  🏷️ AI标签: {tag_str}")
+    print(f"  🏷️ 标签: {tag_str}")
 
     telegraph_url = create_telegraph_page(clean_t, urls)
 
-    # 封面用列表页缩略图（不裁剪）
+    # 封面：优先使用列表页缩略图，回退到内容页智能选择
     cover_item = None
     if cover_url_from_list:
         print(f"  📸 封面(列表页缩略图): {cover_url_from_list[:80]}")
         raw = download_image_raw(cover_url_from_list, post_url)
         if raw:
-            cover_item = raw
+            # 对列表页缩略图也应用裁剪
+            data, ctype = raw
+            cropped = crop_image(data)
+            cover_item = (cropped, ctype)
     if not cover_item:
-        cover_item = download_cover(post_url, post_url)
+        cover_url, cover_item = download_and_select_cover(urls, post_url)
     if not cover_item:
         print("  ❌ 封面下载失败")
         return False
 
-    # 封面原图直发（不裁剪，裁剪用在图集里）
-
     caption = f"<b>{clean_t}</b>"
     if tag_str:
         caption += f"\n{tag_str}"
-    if telegraph_url:
-        caption += f"\n\n<a href=\"{telegraph_url}\">👉 点击查看完整图集</a>"
-    else:
-        caption += "\n\n⚠️ Telegraph 页面生成失败"
+    caption += f"\n\n{'<a href=\"' + telegraph_url + '\">👉 点击查看完整图集</a>' if telegraph_url else '⚠️ Telegraph 页面生成失败'}"
 
     ok = send_photo_with_retry(CHAT_ID, cover_item, caption)
     if not ok:
         print("  ❌ 频道发送失败")
         return False
     print("  ✅ 已发送到频道")
-
     if GROUP_ID:
-        group_ok = send_photo_with_retry(GROUP_ID, cover_item, caption)
+        cover_data, cover_ctype = cover_item
+        cover_data.seek(0)
+        group_cover = (BytesIO(cover_data.read()), cover_ctype)
+        group_ok = send_photo_with_retry(GROUP_ID, group_cover, caption)
         if group_ok:
             print("  ✅ 已发送到群组")
         else:
@@ -478,12 +598,15 @@ def process_post(title, post_url, cover_url_from_list=""):
     return True
 
 
+# ============================================================
+#  帖子抓取（增强版：WordPress 主题兼容 + 分类交错排序）
+# ============================================================
+
 def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
-    """按页交错发：先发所有分类的最后一页，再发倒数第二页..."""
-    all_categorized_posts = []  # all_categorized_posts[cat_idx][page_idx] = [posts]
+    all_categorized_posts = []
     global_seen_urls = set()
 
-    for cat_idx, page_url in enumerate(pages):
+    for page_url in pages:
         print(f"\n===== 抓取分类: {page_url} =====")
         r = fetch_with_retry(page_url)
         if not r:
@@ -493,42 +616,45 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
         cat_pages = get_all_page_urls(page_url, soup)
         print(f"  从导航提取 {len(cat_pages)} 个分页")
 
+        # 补充到 min_pages 页
         if len(cat_pages) < min_pages:
             existing_nums = set()
             for u in cat_pages:
-                m = re.search(r'/page/(\d+)/?', u)
+                m = re.search(r"/page/(\d+)/?", u)
                 if m:
                     existing_nums.add(int(m.group(1)))
                 else:
-                    m = re.search(r'[?&]page=(\d+)', u)
+                    m = re.search(r"[?&]page=(\d+)", u)
                     if m:
                         existing_nums.add(int(m.group(1)))
             start = max(existing_nums) + 1 if existing_nums else 2
-            base = page_url.rstrip('/')
+            base = page_url.rstrip("/")
             for p in range(start, min_pages + 1):
                 new_url = f"{base}/page/{p}/"
                 if new_url not in cat_pages:
                     cat_pages.append(new_url)
             print(f"  补充后共 {len(cat_pages)} 个分页")
 
-        # 反转：从旧到新
         cat_pages_sorted = cat_pages[:min_pages][::-1]
         print(f"  页面抓取顺序（从旧到新）:")
         for c in cat_pages_sorted:
             print(f"    {c}")
 
-        category_posts = []  # category_posts[page_idx] = [posts from this page]
+        category_posts = []
         for idx, cat_url in enumerate(cat_pages_sorted, 1):
             print(f"  📄 第{idx}页: {cat_url}")
             r = fetch_with_retry(cat_url)
             page_posts = []
             if r:
                 soup = BeautifulSoup(r.text, "html.parser")
-                # WordPress块结构: <article>内有<figure>封面 + <h2>标题<a>
+
+                # WordPress 主题兼容：优先 wp-block-post，后备 article / .post
                 articles = soup.find_all("li", class_="wp-block-post")
+                if not articles:
+                    articles = soup.select("article") or soup.select(".post")
+
                 for art in reversed(articles):
-                    # 取标题
-                    title_el = art.find("h2", class_="wp-block-post-title")
+                    title_el = art.find("h2", class_="wp-block-post-title") or art.find("h2")
                     if not title_el:
                         continue
                     link = title_el.find("a", href=True)
@@ -542,27 +668,30 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
                     if full in global_seen_urls:
                         print(f"    ⏭️ 已抓取过: {title[:50]}...")
                         continue
-                    # 取封面
+
+                    # 提取列表页缩略图 URL
                     cover_src = ""
-                    figure = art.find("figure", class_="wp-block-post-featured-image")
+                    figure = art.find("figure", class_="wp-block-post-featured-image") or art.find("figure")
                     if figure:
                         cover_img = figure.find("img")
                         if cover_img:
                             cover_src = fix_image_url(cover_img.get("src") or cover_img.get("data-src") or "")
+
                     page_posts.append({"title": title, "url": full, "cover_url": cover_src})
                     global_seen_urls.add(full)
-                    print(f"    ✅ 新帖: {title[:50]}... | {full}" + (f" | 🖼️ {cover_src[:30]}..." if cover_src else ""))
+                    print(f"    ✅ 新帖: {title[:50]}... | {full}" +
+                          (f" | 🖼️ {cover_src[:30]}..." if cover_src else ""))
                 print(f"    本页新增 {len(page_posts)} 条")
             category_posts.append(page_posts)
             time.sleep(0.3)
 
         all_categorized_posts.append(category_posts)
 
-    # 按页交错排列：先发所有分类的最后一页(第5页)，再发第4页...最后第1页
+    # 按页交错排列：让不同分类的帖子穿插出现
     final_posts = []
     max_pages = max((len(cp) for cp in all_categorized_posts), default=0)
     print(f"\n===== 按页交错排列（{max_pages}页 × {len(pages)}分类）=====")
-    for page_idx in range(max_pages - 1, -1, -1):  # 从最后一页到第一页
+    for page_idx in range(max_pages - 1, -1, -1):
         for cat_idx in range(len(pages)):
             if page_idx < len(all_categorized_posts[cat_idx]):
                 posts = all_categorized_posts[cat_idx][page_idx]
@@ -571,8 +700,13 @@ def get_new_posts_from_pages(pages, min_pages=MIN_CAT_PAGES):
                     print(f"  🔄 分类[{cat_name}] 第{page_idx+1}页 → {len(posts)} 条")
                     final_posts.extend(posts)
 
-    print(f"\n===== 共 {len(final_posts)} 条候选帖子（按页交错排列） =====")
+    print(f"\n===== 共 {len(final_posts)} 条候选帖子（按页交错排列）=====")
     return final_posts
+
+
+# ============================================================
+#  主入口
+# ============================================================
 
 if __name__ == "__main__":
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 4KHD 搬运启动")
