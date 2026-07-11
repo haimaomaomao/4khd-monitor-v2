@@ -263,16 +263,19 @@ def create_telegraph_page(title, image_urls):
         return None
     children = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
     print(f"  📝 创建 Telegraph 页面，共 {len(children)} 张")
+
+    # 在末尾追加推广图片和超链接
     children.append({
-    "tag": "img",
-    "attrs": {"src": "https://picui.ogmua.cn/s1/2026/07/11/6a51e2750e033.webp"}
+        "tag": "img",
+        "attrs": {"src": "https://i.ibb.co/bYwH4Y2/Chat-GPT-Image-2026-7-2-23-55-12.png"}
     })
     children.append({
-    "tag": "p",
-    "children": [
-        {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
-    ]
-})
+        "tag": "p",
+        "children": [
+            {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
+        ]
+    })
+
     for attempt in range(3):
         try:
             r = requests.post(
